@@ -39,15 +39,21 @@
         };
       }
 
-      function createCurrentLocation() {
+      function createCurrentLocation(base) {
         const { pathname, search, hash } = window.location;
+
+        if (base.indexOf("#") > -1) {
+          // 如果是hash路由，createCurrentLocation 返回 # 后面的部分
+          return base.slice(1) || "/";
+        }
+
         return pathname + hash + search;
       }
 
-      function useHistoryStateNavgation() {
+      function useHistoryStateNavgation(base) {
         // 路由路径
         const currentLocation = {
-          value: createCurrentLocation(),
+          value: createCurrentLocation(base),
         };
         // 路由状态
         const historyState = {
@@ -61,13 +67,16 @@
             true
           );
         }
+
         // 跳转并更新状态
         function changeLocation(to, state, replace = false) {
+          const url = base.indexOf("#") > -1 ? base + to : to;
+
           // window.history.replaceState/pushState 传入的 state 会修改掉 window.history.state，但是 historyState.value 需要手动修改为 state
           window.history[replace ? "replaceState" : "pushState"](
             state,
             null,
-            to
+            url
           );
           historyState.value = state;
         }
@@ -120,11 +129,11 @@
       }
 
       // 前进、后退的时候，要更新 historyState 和 currentLocation
-      function useHistoryListeners(historyState, currentLocation) {
+      function useHistoryListeners(base, historyState, currentLocation) {
         let listeners = [];
         // popstate 回调函数中的 state 是已经前进或后退完毕后的最新状态
         const popStateHandler = ({ state }) => {
-          const to = createCurrentLocation();
+          const to = createCurrentLocation(base);
           const from = currentLocation.value;
           const fromState = historyState.value;
 
@@ -147,9 +156,10 @@
         };
       }
 
-      function createWebHistory() {
-        const historyNavgation = useHistoryStateNavgation();
+      function createWebHistory(base = "") {
+        const historyNavgation = useHistoryStateNavgation(base);
         const historyListeners = useHistoryListeners(
+          base,
           historyNavgation.state,
           historyNavgation.location
         );
@@ -167,9 +177,26 @@
         });
         return routerHistory;
       }
-      const routerHistory = createWebHistory();
+
+      function createWebHashHistory() {
+        return createWebHistory("#");
+      }
+
+      // history 模式路由系统
+      // const routerHistory = createWebHistory();
+
+      // hash 模式路由系统
+      const routerHistory = createWebHashHistory();
+
       routerHistory.listen((to, from, { isBack }) => {
-        console.log('to：', to,'         from：', from,'         是后退吗？', isBack);
+        console.log(
+          "to：",
+          to,
+          "         from：",
+          from,
+          "         是后退吗？",
+          isBack
+        );
       });
     </script>
   </body>
