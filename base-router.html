@@ -41,12 +41,10 @@
 
       function createCurrentLocation(base) {
         const { pathname, search, hash } = window.location;
-
         if (base.indexOf("#") > -1) {
           // 如果是hash路由，createCurrentLocation 返回 # 后面的部分
           return base.slice(1) || "/";
         }
-
         return pathname + hash + search;
       }
 
@@ -117,7 +115,7 @@
           );
           console.log("replace跳转时传入的state", state);
           changeLocation(to, state, true); // 跳转并更新history的状态
-          currentLocation.value = to; // 替换后，需要将路径变为现在的路径
+          currentLocation.value = to;
         }
 
         return {
@@ -139,7 +137,7 @@
 
           // 点击前进/后退按钮后，修改当前的路径和状态
           currentLocation.value = to;
-          historyState.value = state; // state 可能为null
+          historyState.value = state; // state 可能为 null
 
           let isBack = state.position - fromState.position < 0;
           // 监听到前进/后退，执行所有的listener

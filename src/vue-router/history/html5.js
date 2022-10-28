@@ -1,0 +1,145 @@
+function buildState(
+  back,
+  current,
+  forward,
+  replace = false,
+  computedScroll = false
+) {
+  return {
+    back,
+    current,
+    forward,
+    replace,
+    // 缓存scroll之后，可以利用 window.scrollBy(pageXOffset, pageYOffset); 将页面滚动到原来的位置
+    scroll: computedScroll
+      ? { left: window.pageXOffset, top: window.pageYOffset }
+      : null,
+    position: window.history.length - 1,
+  };
+}
+
+function createCurrentLocation(base) {
+  const { pathname, search, hash } = window.location;
+
+  if (base.indexOf("#") > -1) {
+    // 如果是hash路由，createCurrentLocation 返回 # 后面的部分
+    return base.slice(1) || "/";
+  }
+
+  return pathname + hash + search;
+}
+
+function useHistoryStateNavgation(base) {
+  // 路由路径
+  const currentLocation = {
+    value: createCurrentLocation(base),
+  };
+  // 路由状态
+  const historyState = {
+    value: window.history.state,
+  };
+  // 第一次打开页面，window.history.state 为 null，就自己维护一个状态(后退的路径、当前的路径、要去的路径、是push跳转还是repalce跳转、跳转后的滚动条位置)，并通过 history.replaceState 替换掉当前的状态
+  if (!historyState.value) {
+    changeLocation(
+      currentLocation.value,
+      buildState(null, currentLocation.value, null, true),
+      true
+    );
+  }
+
+  // 跳转并更新状态
+  function changeLocation(to, state, replace = false) {
+    const url = base.indexOf("#") > -1 ? base + to : to;
+
+    // window.history.replaceState/pushState 传入的 state 会修改掉 window.history.state，但是 historyState.value 需要手动修改为 state
+    window.history[replace ? "replaceState" : "pushState"](state, null, url);
+    historyState.value = state;
+  }
+  function push(to, data) {
+    const currentState = Object.assign({}, historyState.value, {
+      forward: to,
+      scroll: { left: window.pageXOffset, top: window.pageYOffset },
+    });
+    /**
+     * 下方location的第一个参数 to 为 当前路径 currentState.current；第三个参数为 true，即使用 history.replaceState 替换掉当前路由；
+     * 所以这里本质并没有跳转，【只是更新了当前状态】，后续在vue中我们可以详细监听到状态的变化
+     * 这一步的目的是为了实现在将要跳转前，触发生命周期钩子
+     */
+    changeLocation(currentState.current, currentState, true);
+
+    // 创建 history.pushState 需要传入的 state，并实现真正的跳转
+    const state = Object.assign(
+      {},
+      buildState(currentLocation.value, to, null, false),
+      { position: currentState.position + 1 },
+      data
+    );
+    console.log("push跳转时传入的state", state);
+    changeLocation(to, state, false); // 真正的跳转
+    currentLocation.value = to;
+  }
+  function replace(to, data) {
+    // 创建 history.replaceState 需要传入的 state，并实现真正的跳转
+    const state = Object.assign(
+      {},
+      buildState(historyState.value.back, to, historyState.value.forward, true),
+      data
+    );
+    console.log("replace跳转时传入的state", state);
+    changeLocation(to, state, true); // 跳转并更新history的状态
+    currentLocation.value = to; // 替换后，需要将路径变为现在的路径
+  }
+
+  return {
+    location: currentLocation,
+    state: historyState,
+    push,
+    replace,
+  };
+}
+
+// 前进、后退的时候，要更新 historyState 和 currentLocation
+function useHistoryListeners(base, historyState, currentLocation) {
+  let listeners = [];
+  // popstate 回调函数中的 state 是已经前进或后退完毕后的最新状态
+  const popStateHandler = ({ state }) => {
+    const to = createCurrentLocation(base);
+    const from = currentLocation.value;
+    const fromState = historyState.value;
+
+    // 点击前进/后退按钮后，修改当前的路径和状态
+    currentLocation.value = to;
+    historyState.value = state; // state 可能为null
+
+    let isBack = state.position - fromState.position < 0;
+    // 监听到前进/后退，执行所有的listener
+    listeners.forEach((listener) => {
+      listener(to, from, { isBack });
+    });
+  };
+  window.addEventListener("popstate", popStateHandler); // 监听浏览器的前进、后退
+  function listen(cb) {
+    listeners.push(cb);
+  }
+  return {
+    listen,
+  };
+}
+
+export function createWebHistory(base = "") {
+  const historyNavgation = useHistoryStateNavgation(base);
+  const historyListeners = useHistoryListeners(
+    base,
+    historyNavgation.state,
+    historyNavgation.location
+  );
+  const routerHistory = Object.assign({}, historyNavgation, historyListeners);
+
+  Object.defineProperty(routerHistory, "location", {
+    get: () => historyNavgation.location.value,
+  });
+  Object.defineProperty(routerHistory, "state", {
+    get: () => historyNavgation.state.value,
+  });
+  return routerHistory;
+}
