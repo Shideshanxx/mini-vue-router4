@@ -546,7 +546,7 @@ export { createWebHashHistory, createWebHistory, createRouter };
 ```
 
 ### createRouterMatcher
-当我们访问 url 时，需要快速准确地匹配到组件；而用户传递进来的路由配置是深层嵌套的，我们需要给他拍平来符合我们地要求。
+当我们访问 url 时，需要快速准确地匹配到组件；而用户传递进来的路由配置是深层嵌套的，我们需要给他拍平来符合我们的要求。
 目标格式如下：
 ```js
 matchers: [
@@ -661,7 +661,203 @@ function createRouterMatcher(routes) {
 }
 ```
 ## vue-router4 中的响应式原理
+### 定义$router、$route 以及 注入全局的 router 和 ReactiveRoute
+为了保证注入到全局的 `ReactiveRoute` 经过解构的每一属性都具有响应式，实现步骤：
+1. 先使用 `shallowRef` 处理 `START_LOCATION_NORMALIZED`，处理结果为 `currentRoute`。
+2. 然后遍历 `currentRoute.value`，使用 `computed` 处理每一个属性，使每个属性具有响应式，然后将每个属性都赋值给 `ReactiveRoute` 对象。但是还有一个缺点就是取 `ReactiveRoute` 属性值的时候，需要增加一个 `.value`
+3. 最后使用 `reactive` 处理 `ReactiveRoute`，目的是为了在取 `ReactiveRoute` 属性值的时候不需要通过 `.value` 获取
+
+不直接使用 `reactive` 处理 `START_LOCATION_NORMALIZED` 的原因是使用 `reactive` 处理的对象，解构后的属性不具有响应式。
+```js
+// 初始化路由系统中的默认参数
+const START_LOCATION_NORMALIZED = {
+  path: "/",
+  params: {}, // 路径参数
+  query: {},
+  matched: [], // 路径的匹配结果
+};
+function createRouter(options) {
+  let currentRoute = shallowRef(START_LOCATION_NORMALIZED);
+  const router = {
+    push,
+    replace,
+    install(app) {
+      const router = this;  // this指向router
+      // 1. 定义全局的 $router 和 $route
+      app.config.globalProperties.$router = router;
+      Object.defineProperty(app.config.globalProperties, "$route", {
+        enumerable: true,
+        get: () => unref(currentRoute),
+      });
+
+      // 2. 注入 router 和 ReactiveRoute
+      const ReactiveRoute = {};
+      for (const key in START_LOCATION_NORMALIZED) {
+        // 使用 computed 使 currentRoute.value 中的每一项具备响应式
+        ReactiveRoute[key] = computed(() => currentRoute.value[key]);
+      }
+      app.provide("router", router); // 暴露router ——> useRouter 本质上就是 inject('router')
+      // 经过computed处理后的数据需要通过 .value 属性进行取值。如果再使用reactive对ref数据进行包裹，则可以直接取值，而不需要通过 ReactiveRoute[key].value 的方式取值
+      app.provide("route location", reactive(ReactiveRoute));
+    }
+  }
+}
+```
+
+### 初始化 currentRoute、实现push、注册listen事件
+初始化 `currentRoute`：
+1. 初始状态为 `let currentRoute = shallowRef(START_LOCATION_NORMALIZED);`，所以当两者相等时即为页面初始化；
+2. 当页面初始化时，注册`listen`事件监听浏览器的前进后退，以及初始化 `currentRoute`
+3. 初始化 `currentRoute` 的值通过 `matcher.resolve({ path: to })` 获取，本质是在 `matchers` 中寻找到 `path` 对应的 `record`，然后使用 `while` 循环将它所有的组件 `recode` 全部获取到，合成一个数组。
+
+`push` 的实现：
+1. 通过 `matcher.resolve({ path: to })` 获取到目标路径的 `matched` 和 `path`，赋值为 `targetLocation`
+2. 更新 `currentRoute`，赋值为 `targetLocation`
+3. 通过 `routerHistory.push(to.path);` 进行页面跳转
+
+注册`listen`，监听浏览器的前进、后退：
+1. 当页面初始化时注册 `listen` 事件，通过标识符确保只会注册一次；
+2. 本质是通过 `routerHistory.listen();` 进行注册，即监听 `popState` 事件，当状态改变时，就会遍历 `listeners` 数组，执行所有的 `listen` 回调。
+3. 在回调中通过 `matcher.resolve({ path: to })` 获取到目标路径的 `matched` 和 `path`；再读取到当前的 `currentRoute`；最后通过 `routerHistory.replace(to.path);` 进行页面跳转。
+
+具体实现如下：
+```js
+function createRouterMatcher(routes) {
+  // ...略
+
+  /**
+   * 根据用户跳转传入的to（如果是字符串，已经转化成了对象），获取到匹配的组件record（包括祖先组件的record）
+   */
+  function resolve(to) {
+    const matched = [];
+    let path = to.path;
+    let matcher = matchers.find((m) => m.path === path);
+
+    // 通过while循环，将path涉及到的所有组件全部放到matched中
+    while (matcher) {
+      matched.unshift(matcher.record);
+      matcher = matcher.parent;
+    }
+
+    return {
+      path,
+      matched,
+    };
+  }
+  return {
+    addRoute,
+    resolve,
+  };
+}
+function createRouter(options) {
+  // to 支持多种格式，可能是字符串，也可能是一个对象，
+  function resolve(to) {
+    if (typeof to === "string") {
+      return matcher.resolve({ path: to });
+    } else {
+      return matcher.resolve(to);
+    }
+  }
+  // 注入listen事件，监听前进、后退
+  let ready;
+  function markAsReady() {
+    if (ready) return;
+    ready = true;
+    // 监听前进后退
+    routerHistory.listen((to) => {
+      const targetLocation = resolve(to);
+      const from = currentRoute.value;
+      // 传入第三个参数，即前进/后退时采用replace模式
+      finalizeNavigation(targetLocation, from, true);
+    });
+  }
+  // 初始化（注册listen事件）、页面跳转、状态更新
+  function finalizeNavigation(to, from, replaced) {
+    // 如果是初始化页面，或者浏览器的前进、后退
+    if (from === START_LOCATION_NORMALIZED || replaced) {
+      // 初始化时，注册listen事件【只注册一次】，用来监听popstate事件，状态改变时修改 currentRoute 以及进行页面跳转
+      markAsReady();
+    } else if (replaced) {
+      routerHistory.replace(to.path);
+    } else {
+      routerHistory.push(to.path);
+    }
+    // 更新currentRoute
+    currentRoute.value = to;
+  }
+  function pushWithRedirect(to) {
+    // 根据 matcher 匹配到对应的 record
+    const targetLocation = resolve(to);
+    const from = currentRoute.value;
+    finalizeNavigation(targetLocation, from);
+  }
+  function push(to) {
+    return pushWithRedirect(to);
+  }
+  const router = {
+    push,
+    install(app) {
+      // 如果是初始化，需要通过路由系统先进行一次跳转，发生匹配
+      if (currentRoute.value === START_LOCATION_NORMALIZED) {
+        push(routerHistory.location);
+      }
+    }
+  }
+}
+```
+
+## RouterLink 的实现
+简单来说就是使用 `app.component()` 注册一个全局组件，在该组件中渲染出 `slots.default`，以及绑定一个点击事件；在点击事件中执行 `router.push()` 方法进行页面跳转。
+```js
+// vue-router/index.js
+import { RouterLink } from "./router-link";
+function createRouter(options) {
+  const router = {
+    push,
+    replace,
+    install(app) {
+      // 注册全局组件 router-link
+      app.component("RouterLink", RouterLink);
+    }
+  }
+}
+```
+```js
+// vue-router/router-link.js
+import { h, inject } from "vue";
+function useLink(props) {
+  const router = inject("router");
+  function navigate() {
+    router.push(props.to);
+  }
+  return { navigate };
+}
+export const RouterLink = {
+  name: "RouterLink",
+  props: {
+    to: {
+      type: [String, Object],
+      required: true,
+    },
+  },
+  setup(props, { slots }) {
+    const link = useLink(props);
+    return () => {
+      return h(
+        "a",
+        {
+          onclick: link.navigate,
+          style: { cursor: "pointer" },
+        },
+        slots.default && slots.default()
+      );
+    };
+  },
+};
+```
 
 ## RouterView 的实现
+
+
 
 ## 路由导航守卫的实现
