@@ -14,5 +14,14 @@ export default {
   components: {
     HelloWorld,
   },
+  beforeRouteEnter(to, from, next) {
+    console.log("beforeRouteEnter", to);
+  },
+  beforeRouteUpdate(to, from, next) {
+    console.log("beforeRouteUpdate", to);
+  },
+  beforeRouteLeave(to, from, next) {
+    console.log("beforeRouteLeave", to);
+  },
 };
 </script>

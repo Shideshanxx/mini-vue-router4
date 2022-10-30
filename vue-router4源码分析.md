@@ -916,3 +916,212 @@ export const RouterView = {
 ```
 
 ## 路由导航守卫的实现
+### 注册全局守卫
+先在 `router` 实例上创建三个全局守卫：`beforeEach`、`afterEach`、`beforeResolve`，它们可以接收一个回调函数，并且可以重复注册；所以可以使用闭包的方式创建数据：
+```js
+function useCallback() {
+  const handlers = [];
+  function add(handler) {
+    handlers.push(handler);
+  }
+  return {
+    add,
+    list: () => handlers,
+  };
+}
+function createRouter(options) {
+  const beforeGuards = useCallback();
+  const beforeResolveGuards = useCallback();
+  const afterGuards = useCallback();
+  const router = {
+    beforeEach: beforeGuards.add,
+    afterEach: afterGuards.add,
+    beforeResolve: beforeResolveGuards.add,
+  }
+  return router;
+}
+```
+注册全局守卫钩子，即向 `handlers` 数组中添加回调，还可以通过 `list` 属性读取 `handlers` 数组。
+
+### 实现导航守卫
+修改 `pushWithRedirect(to)`，在路由跳转前实现 afterEach 之前的六个导航守卫，在路由跳转后实现 afterEach 全局守卫：
+```js
+function pushWithRedirect(to) {
+  const targetLocation = resolve(to);
+  const from = currentRoute.value;
+  // 导航守卫
+  navigate(targetLocation, from)
+    .then(() => {
+      return finalizeNavigation(targetLocation, from);
+    })
+    .then(() => {
+      // 7. 导航切换完毕后，执行 afterEach
+      for (const guard of afterGuards.list()) {
+        guard(to, from);
+      }
+    });
+}
+function push(to) {
+  return pushWithRedirect(to);
+}
+```
+实现 `navigate`：
+1. `navigate` 返回一个`Promise`，所以可以将它定义成 `async` 函数
+2. 在页面跳转时，需要获取到哪些组件是进入、哪些组件是离开、那些组件是更新，方便后续执行对应组件中的组件内守卫
+    ```js
+    /**
+     * 筛选出leavingRecords、updatingRecords、enteringRecords；
+     * 以从 /a 进入 /b 为例：
+    * 1. /a（即 from）的 matched 为 [Home, A]，/b（即 to）的 matched 为 [Home, B]，
+    * 2. 经过下面的筛选后，updatingRecords为 [Home]、leavingRecords为 [A]、enteringRecords 为 [B]
+    */
+    function extractChangeRecords(to, from) {
+      const leavingRecords = [];
+      const updatingRecords = [];
+      const enteringRecords = [];
+      const len = Math.max(to.matched.length, from.matched.length);
+      for (let i = 0; i < len; i++) {
+        // 一、离开的时候
+        const recordFrom = from.matched[i];
+        if (recordFrom) {
+          // 1. 如果去的和来的都有，那么就是更新（比如从 '/' 到 '/'，就是更新）
+          if (to.matched.find((record) => record.path === recordFrom.path)) {
+            updatingRecords.push(recordFrom);
+          } else {
+            // 2. 否则就是离开
+            leavingRecords.push(recordFrom);
+          }
+        }
+        // 二、进入的时候
+        const recordTo = to.matched[i];
+        if (recordTo) {
+          // 如果来的里面不含去的，就是进入
+          if (!from.matched.find((record) => record.path === recordTo.path)) {
+            enteringRecords.push(recordTo);
+          }
+        }
+      }
+      return [leavingRecords, updatingRecords, enteringRecords];
+    }
+    function createRouter(options) {
+      async function navigate(to, from) {
+        // 在导航的时候，需要知道哪些组件是进入，哪些组件是离开，那些组件是更新
+        const [leavingRecords, updatingRecords, enteringRecords] = extractChangeRecords(to, from);
+      }
+    }
+    ```
+3. 为了保证钩子的调用顺序，需要借助 `Promise` 来实现；所以执行完`guards`后，需要返回一个`Promise`（下方的`runGuardQueue`方法）。另外每一个`guard`也需要是一个`Promise`，保证相同`guard`的执行顺序（下方的`guardToPromise`方法）。
+   ```js
+    // 将guard封装成Promise
+    function guardToPromise(guard, to, from, record) {
+      return () =>
+        new Promise((resolve, reject) => {
+          const next = () => resolve();
+          // 绑定guard的this
+          const guardReturn = guard.call(record, to, from, next);
+          // 如果用户没有手动调用next，则返回一个新的Promise，并自动执行next
+          return Promise.resolve(guardReturn).then(next);
+        });
+    }
+    // 获取 guardType 对应的所有 guards
+    function extractComponentsGuards(matched, guardType, to, from) {
+      const guards = [];
+      for (const record of matched) {
+        let rawComponent = record.components.default;
+        const guard = rawComponent[guardType];
+        // 每一个 guard 都需要是 Promise
+        guard && guards.push(guardToPromise(guard, to, from, record));
+      }
+      return guards;
+    }
+    // 通过 Promise 链式执行 guards 中所有的守卫钩子（每个守卫钩子也是一个Promise），并返回新的 Promise
+    function runGuardQueue(guards) {
+      return guards.reduce(
+        (promise, guard) => promise.then(() => guard()),
+        Promise.resolve()
+      );
+    }
+    function createRouter(options) {
+      async function navigate(to, from) {
+        // ...略
+
+        // 下方的 guards 是 leavingRecords 中所有组件对应的 beforeRouteLeave 钩子组成的数组
+        // 离开的时候需要先销毁子组件，再销毁父组件，所以需要将leavingRecords倒序
+        let guards = extractComponentsGuards(
+          leavingRecords.reverse(),
+          "beforeRouteLeave",
+          to,
+          from
+        );
+        // 1. 执行leavingRecords中所有组件内钩子 beforeRouteLeave
+        return runGuardQueue(guards).then...
+      }
+    }
+   ```
+
+4. 导航守卫的执行顺序为：离开组件中的`beforeRouteLeave`、全局`beforeEach`、重用组件里的`beforeRouteUpdate`、路由配置里的`beforeEnter`、进入组件里的`beforeRouteEnter`、全局`beforeResolve`、全局`afterEach`
+```js
+function createRouter(options) {
+  async function navigate(to, from) {
+    // ...略
+
+    let guards = extractComponentsGuards(
+      leavingRecords.reverse(),
+      "beforeRouteLeave",
+      to,
+      from
+    );
+    // 1. 执行leavingRecords中所有组件内钩子 beforeRouteLeave
+    return runGuardQueue(guards)
+      .then(() => {
+        // 2. 执行全局守卫 beforeEach
+        guards = [];
+        for (const guard of beforeGuards.list()) {
+          guards.push(guardToPromise(guard, to, from, guard));
+          return runGuardQueue(guards);
+        }
+      })
+      .then(() => {
+        // 3. 执行组件内钩子 beforeRouteUpdate
+        guards = extractComponentsGuards(
+          updatingRecords.reverse(),
+          "beforeRouteUpdate",
+          to,
+          from
+        );
+        return runGuardQueue(guards);
+      })
+      .then(() => {
+        // 4. 执行路由配置里的钩子 beforeEnter
+        guards = [];
+        for (const record of to.matched) {
+          if (record.beforeEnter) {
+            guards.push(guardToPromise(record.beforeEnter, to, from, record));
+          }
+        }
+        return runGuardQueue(guards);
+      })
+      .then(() => {
+        // 5. 执行组件内钩子 beforeRouteEnter
+        guards = extractComponentsGuards(
+          enteringRecords.reverse(),
+          "beforeRouteEnter",
+          to,
+          from
+        );
+        return runGuardQueue(guards);
+      })
+      .then(() => {
+        // 6. 执行全局守卫 beforeResolve
+        guards = [];
+        for (const guard of beforeResolveGuards.list()) {
+          guards.push(guardToPromise(guard, to, from, guard));
+          return runGuardQueue(guards);
+        }
+      });
+  }
+}
+```
+
+## 写在最后
+本篇主要是对 vue-router4 源码的学习总结，源代码仓库可以查看 [mini-vue-router4](https://github.com/Shideshanxx/mini-vue-router4.git)。如果本篇对你有所帮助，欢迎点赞收藏，顺便给个 star ～～。
