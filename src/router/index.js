@@ -4,6 +4,9 @@ import {
   createWebHashHistory,
 } from "@/vue-router";
 import Home from "../views/Home.vue";
+import About from "../views/About.vue";
+import A from "../views/A.vue";
+import C from "../views/C.vue";
 
 const routes = [
   {
@@ -13,7 +16,13 @@ const routes = [
     children: [
       {
         path: "a",
-        component: { render: () => <h1>a页面</h1> },
+        component: A,
+        children: [
+          {
+            path: "c",
+            component: C,
+          },
+        ],
       },
       {
         path: "b",
@@ -24,8 +33,7 @@ const routes = [
   {
     path: "/about",
     name: "About",
-    component: () =>
-      import(/* webpackChunkName: "about" */ "../views/About.vue"),
+    component: About,
   },
 ];
 

@@ -662,6 +662,10 @@ function createRouterMatcher(routes) {
 ```
 ## vue-router4 中的响应式原理
 ### 定义$router、$route 以及 注入全局的 router 和 ReactiveRoute
+实现 `ReactiveRoute` 响应式的目的：
+1. 每次修改 `currentRoute` 时，`ReactiveRoute` 都能响应式更新
+2. 在 `RouterView` 组件中，当路由变化时，获取到响应式的`ReactiveRoute.matched`
+
 为了保证注入到全局的 `ReactiveRoute` 经过解构的每一属性都具有响应式，实现步骤：
 1. 先使用 `shallowRef` 处理 `START_LOCATION_NORMALIZED`，处理结果为 `currentRoute`。
 2. 然后遍历 `currentRoute.value`，使用 `computed` 处理每一个属性，使每个属性具有响应式，然后将每个属性都赋值给 `ReactiveRoute` 对象。但是还有一个缺点就是取 `ReactiveRoute` 属性值的时候，需要增加一个 `.value`
@@ -857,7 +861,58 @@ export const RouterLink = {
 ```
 
 ## RouterView 的实现
+步骤：
+1. 通过 `inject("route location")` 可以注入响应式的 `ReactiveRoute`，里面包含经过路由匹配到的所有 `matcher.record`（数组格式，`parent`在前、`children`在后）
+2. 目标是：在对应的 `RouterView` 组件渲染出对应位置的 `record.components.default`
+   1. 通过 `inject` 注入父级 `RouterView` 组件传入的 `depth`
+   2. `depth` 初始值为0，即 根`RouterView` 组件渲染 `matched` 的第一个元素，然后将 `depth` 加1，通过 `provide` 传递给下一个`RouterView` 组件
+3. 通过响应式获取路由对应的`matched`，配合`inject`、`provide`传递`depth`的方式，实现 `RouterView` 能准确渲染出`matched`对应位置的组件
 
+注意：`injectRoute.matched[depth]` 必须通过 `computed` 设为响应式
++ 当没点击 `RouterLink` 前，`injectRoute.matched[depth]` 是 `undefined`（`RouterView`相当于一个空标签，起到占位的作用）
++ 点击`RouterLink`、`injectRoute.matched` 改变后，`injectRoute.matched[depth]` 才能取到对应的值
++ 只有当 `injectRoute.matched[depth]` 是响应式的，才能在点击 `RouterLink` 、改变它的值之后，触发 `ViewRouter` 的重新渲染。
 
+具体实现：
+```js
+// vue-router/index.js
+import { RouterView } from "./router-view";
+function createRouter(options) {
+  const router = {
+    push,
+    replace,
+    install(app) {
+      // 注册全局组件 router-view
+      app.component("RouterView", RouterView);
+    }
+  }
+}
+```
+```js
+import { computed, h, inject, provide } from "vue";
+export const RouterView = {
+  name: "RouterView",
+  setup(props, { slots }) {
+    // 默认渲染injectRoute.matched数组中的第1个 record 对应的 components.default
+    const depth = inject("depth", 0);
+    const injectRoute = inject("route location");
+    /**
+     * 没点击 RouterLink 前，injectRoute.matched[depth] 是 undefined（相当于一个空标签），没有取到下一层匹配的 matcher
+     * 所以 matchedRouteRef 必须是响应式的，当点击RouterLink、injectRoute.matched 改变后，injectRoute.matched[depth] 才能取到对应的值，再将 ViewRouter 渲染出来
+     */
+    const matchedRouteRef = computed(() => injectRoute.matched[depth]);
+    provide("depth", depth + 1); // 在前一个的基础上加1
+
+    return () => {
+      const matchRoute = matchedRouteRef.value;
+      const viewComponent = matchRoute && matchRoute.components.default;
+      if (!viewComponent) {
+        return slots.default && slots.default();
+      }
+      return h(viewComponent);
+    };
+  },
+};
+```
 
 ## 路由导航守卫的实现
