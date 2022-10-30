@@ -132,7 +132,7 @@ function createRouter(options) {
   // 初始化（注册listen事件）、页面跳转、状态更新
   function finalizeNavigation(to, from, replaced) {
     // 如果是初始化页面，或者浏览器的前进、后退
-    if (from === START_LOCATION_NORMALIZED || replaced) {
+    if (from === START_LOCATION_NORMALIZED) {
       // 初始化时，注册listen事件【只注册一次】，用来监听popstate事件，状态改变时修改 currentRoute 以及进行页面跳转
       markAsReady();
     } else if (replaced) {
